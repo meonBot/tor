@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2018, The Tor Project, Inc. */
+// Copyright (c) 2016-2019, The Tor Project, Inc. */
 // See LICENSE for licensing information */
 
 //! FFI functions, only to be called from C.
@@ -7,7 +7,6 @@
 
 use libc::{c_char, c_int, uint32_t};
 use std::ffi::CStr;
-use std::ffi::CString;
 
 use smartlist::*;
 use tor_allocate::allocate_and_copy_string;
@@ -31,6 +30,8 @@ fn translate_to_rust(c_proto: uint32_t) -> Result<Protocol, ProtoverError> {
         7 => Ok(Protocol::Desc),
         8 => Ok(Protocol::Microdesc),
         9 => Ok(Protocol::Cons),
+        10 => Ok(Protocol::Padding),
+        11 => Ok(Protocol::FlowCtrl),
         _ => Err(ProtoverError::UnknownProtocol),
     }
 }
@@ -65,12 +66,7 @@ pub extern "C" fn protover_all_supported(
         if missing_out.is_null() {
             return 0;
         }
-        let c_unsupported: CString = match CString::new(unsupported.to_string()) {
-            Ok(n) => n,
-            Err(_) => return 1,
-        };
-
-        let ptr = c_unsupported.into_raw();
+        let ptr = allocate_and_copy_string(&unsupported.to_string());
         unsafe { *missing_out = ptr };
 
         return 0;
@@ -88,7 +84,7 @@ pub extern "C" fn protocol_list_supports_protocol(
     version: uint32_t,
 ) -> c_int {
     if c_protocol_list.is_null() {
-        return 1;
+        return 0;
     }
 
     // Require an unsafe block to read the version from a C string. The pointer
@@ -97,7 +93,7 @@ pub extern "C" fn protocol_list_supports_protocol(
 
     let protocol_list = match c_str.to_str() {
         Ok(n) => n,
-        Err(_) => return 1,
+        Err(_) => return 0,
     };
     let proto_entry: UnvalidatedProtoEntry = match protocol_list.parse() {
         Ok(n) => n,
@@ -144,7 +140,7 @@ pub extern "C" fn protocol_list_supports_protocol_or_later(
     version: uint32_t,
 ) -> c_int {
     if c_protocol_list.is_null() {
-        return 1;
+        return 0;
     }
 
     // Require an unsafe block to read the version from a C string. The pointer
@@ -153,7 +149,7 @@ pub extern "C" fn protocol_list_supports_protocol_or_later(
 
     let protocol_list = match c_str.to_str() {
         Ok(n) => n,
-        Err(_) => return 1,
+        Err(_) => return 0,
     };
 
     let protocol = match translate_to_rust(c_protocol) {
@@ -163,7 +159,7 @@ pub extern "C" fn protocol_list_supports_protocol_or_later(
 
     let proto_entry: UnvalidatedProtoEntry = match protocol_list.parse() {
         Ok(n) => n,
-        Err(_) => return 1,
+        Err(_) => return 0,
     };
 
     if proto_entry.supports_protocol_or_later(&protocol.into(), &version) {
@@ -187,11 +183,7 @@ pub extern "C" fn protover_get_supported_protocols() -> *const c_char {
 //
 // Why is the threshold a signed integer? —isis
 #[no_mangle]
-pub extern "C" fn protover_compute_vote(
-    list: *const Stringlist,
-    threshold: c_int,
-    allow_long_proto_names: bool,
-) -> *mut c_char {
+pub extern "C" fn protover_compute_vote(list: *const Stringlist, threshold: c_int) -> *mut c_char {
     if list.is_null() {
         return allocate_and_copy_string("");
     }
@@ -203,16 +195,9 @@ pub extern "C" fn protover_compute_vote(
     let mut proto_entries: Vec<UnvalidatedProtoEntry> = Vec::new();
 
     for datum in data {
-        let entry: UnvalidatedProtoEntry = if allow_long_proto_names {
-            match UnvalidatedProtoEntry::from_str_any_len(datum.as_str()) {
-                Ok(n) => n,
-                Err(_) => continue,
-            }
-        } else {
-            match datum.parse() {
-                Ok(n) => n,
-                Err(_) => continue,
-            }
+        let entry: UnvalidatedProtoEntry = match datum.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
         };
         proto_entries.push(entry);
     }

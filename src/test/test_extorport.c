@@ -1,15 +1,15 @@
-/* Copyright (c) 2013-2018, The Tor Project, Inc. */
+/* Copyright (c) 2013-2020, The Tor Project, Inc. */
 /* See LICENSE for licensing information */
 
 #define CONNECTION_PRIVATE
 #define EXT_ORPORT_PRIVATE
 #define MAINLOOP_PRIVATE
 #include "core/or/or.h"
-#include "lib/container/buffers.h"
+#include "lib/buf/buffers.h"
 #include "core/mainloop/connection.h"
 #include "core/or/connection_or.h"
 #include "app/config/config.h"
-#include "feature/control/control.h"
+#include "feature/control/control_events.h"
 #include "lib/crypt_ops/crypto_rand.h"
 #include "feature/relay/ext_orport.h"
 #include "core/mainloop/mainloop.h"
@@ -18,64 +18,11 @@
 
 #include "test/test.h"
 #include "test/test_helpers.h"
+#include "test/rng_test_helpers.h"
 
 #ifdef HAVE_SYS_STAT_H
 #include <sys/stat.h>
 #endif
-
-/* Test connection_or_remove_from_ext_or_id_map and
- * connection_or_set_ext_or_identifier */
-static void
-test_ext_or_id_map(void *arg)
-{
-  or_connection_t *c1 = NULL, *c2 = NULL, *c3 = NULL;
-  char *idp = NULL, *idp2 = NULL;
-  (void)arg;
-
-  /* pre-initialization */
-  tt_ptr_op(NULL, OP_EQ,
-            connection_or_get_by_ext_or_id("xxxxxxxxxxxxxxxxxxxx"));
-
-  c1 = or_connection_new(CONN_TYPE_EXT_OR, AF_INET);
-  c2 = or_connection_new(CONN_TYPE_EXT_OR, AF_INET);
-  c3 = or_connection_new(CONN_TYPE_OR, AF_INET);
-
-  tt_ptr_op(c1->ext_or_conn_id, OP_NE, NULL);
-  tt_ptr_op(c2->ext_or_conn_id, OP_NE, NULL);
-  tt_ptr_op(c3->ext_or_conn_id, OP_EQ, NULL);
-
-  tt_ptr_op(c1, OP_EQ, connection_or_get_by_ext_or_id(c1->ext_or_conn_id));
-  tt_ptr_op(c2, OP_EQ, connection_or_get_by_ext_or_id(c2->ext_or_conn_id));
-  tt_ptr_op(NULL, OP_EQ,
-            connection_or_get_by_ext_or_id("xxxxxxxxxxxxxxxxxxxx"));
-
-  idp = tor_memdup(c2->ext_or_conn_id, EXT_OR_CONN_ID_LEN);
-
-  /* Give c2 a new ID. */
-  connection_or_set_ext_or_identifier(c2);
-  tt_mem_op(idp, OP_NE, c2->ext_or_conn_id, EXT_OR_CONN_ID_LEN);
-  idp2 = tor_memdup(c2->ext_or_conn_id, EXT_OR_CONN_ID_LEN);
-  tt_assert(!tor_digest_is_zero(idp2));
-
-  tt_ptr_op(NULL, OP_EQ, connection_or_get_by_ext_or_id(idp));
-  tt_ptr_op(c2, OP_EQ, connection_or_get_by_ext_or_id(idp2));
-
-  /* Now remove it. */
-  connection_or_remove_from_ext_or_id_map(c2);
-  tt_ptr_op(NULL, OP_EQ, connection_or_get_by_ext_or_id(idp));
-  tt_ptr_op(NULL, OP_EQ, connection_or_get_by_ext_or_id(idp2));
-
- done:
-  if (c1)
-    connection_free_minimal(TO_CONN(c1));
-  if (c2)
-    connection_free_minimal(TO_CONN(c2));
-  if (c3)
-    connection_free_minimal(TO_CONN(c3));
-  tor_free(idp);
-  tor_free(idp2);
-  connection_or_clear_ext_or_id_map();
-}
 
 /* Simple connection_write_to_buf_impl_ replacement that unconditionally
  * writes to outbuf. */
@@ -176,7 +123,7 @@ test_ext_or_init_auth(void *arg)
   /* Shouldn't be initialized already, or our tests will be a bit
    * meaningless */
   ext_or_auth_cookie = tor_malloc_zero(32);
-  tt_assert(tor_mem_is_zero((char*)ext_or_auth_cookie, 32));
+  tt_assert(fast_mem_is_zero((char*)ext_or_auth_cookie, 32));
 
   /* Now make sure we use a temporary file */
   fn = get_fname("ext_cookie_file");
@@ -201,7 +148,7 @@ test_ext_or_init_auth(void *arg)
   tt_mem_op(cp,OP_EQ, "! Extended ORPort Auth Cookie !\x0a", 32);
   tt_mem_op(cp+32,OP_EQ, ext_or_auth_cookie, 32);
   memcpy(cookie0, ext_or_auth_cookie, 32);
-  tt_assert(!tor_mem_is_zero((char*)ext_or_auth_cookie, 32));
+  tt_assert(!fast_mem_is_zero((char*)ext_or_auth_cookie, 32));
 
   /* Operation should be idempotent. */
   tt_int_op(0, OP_EQ, init_ext_or_cookie_authentication(1));
@@ -303,16 +250,6 @@ test_ext_or_cookie_auth(void *arg)
 }
 
 static void
-crypto_rand_return_tse_str(char *to, size_t n)
-{
-  if (n != 32) {
-    TT_FAIL(("Asked for %d bytes, not 32", (int)n));
-    return;
-  }
-  memcpy(to, "te road There is always another ", 32);
-}
-
-static void
 test_ext_or_cookie_auth_testvec(void *arg)
 {
   char *reply=NULL, *client_hash=NULL;
@@ -326,7 +263,7 @@ test_ext_or_cookie_auth_testvec(void *arg)
   memcpy(ext_or_auth_cookie, "Gliding wrapt in a brown mantle," , 32);
   ext_or_auth_cookie_is_set = 1;
 
-  MOCK(crypto_rand, crypto_rand_return_tse_str);
+  testing_enable_prefilled_rng("te road There is always another ", 32);
 
   tt_int_op(0, OP_EQ,
             handle_client_auth_nonce(client_nonce, 32, &client_hash, &reply,
@@ -351,7 +288,7 @@ test_ext_or_cookie_auth_testvec(void *arg)
                  "33b3cd77ff79bd80c2074bbf438119a2");
 
  done:
-  UNMOCK(crypto_rand);
+  testing_disable_prefilled_rng();
   tor_free(reply);
   tor_free(client_hash);
   tor_free(mem_op_hex_tmp);
@@ -414,9 +351,9 @@ do_ext_or_handshake(or_connection_t *conn)
   CONTAINS("\x01\x00", 2);
   WRITE("\x01", 1);
   WRITE("But when I look ahead up the whi", 32);
-  MOCK(crypto_rand, crypto_rand_return_tse_str);
+  testing_enable_prefilled_rng("te road There is always another ", 32);
   tt_int_op(0, OP_EQ, connection_ext_or_process_inbuf(conn));
-  UNMOCK(crypto_rand);
+  testing_disable_prefilled_rng();
   tt_int_op(TO_CONN(conn)->state, OP_EQ,
             EXT_OR_CONN_STATE_AUTH_WAIT_CLIENT_HASH);
   CONTAINS("\xec\x80\xed\x6e\x54\x6d\x3b\x36\xfd\xfc\x22\xfe\x13\x15\x41\x6b"
@@ -481,9 +418,9 @@ test_ext_or_handshake(void *arg)
   tt_int_op(0, OP_EQ, connection_ext_or_process_inbuf(conn));
   /* send the rest of the nonce. */
   WRITE("ahead up the whi", 16);
-  MOCK(crypto_rand, crypto_rand_return_tse_str);
+  testing_enable_prefilled_rng("te road There is always another ", 32);
   tt_int_op(0, OP_EQ, connection_ext_or_process_inbuf(conn));
-  UNMOCK(crypto_rand);
+  testing_disable_prefilled_rng();
   /* We should get the right reply from the server. */
   CONTAINS("\xec\x80\xed\x6e\x54\x6d\x3b\x36\xfd\xfc\x22\xfe\x13\x15\x41\x6b"
            "\x02\x9f\x1a\xde\x76\x10\xd9\x10\x87\x8b\x62\xee\xb7\x40\x38\x21"
@@ -582,7 +519,7 @@ test_ext_or_handshake(void *arg)
 
  done:
   UNMOCK(connection_write_to_buf_impl_);
-  UNMOCK(crypto_rand);
+  testing_disable_prefilled_rng();
   if (conn)
     connection_free_minimal(TO_CONN(conn));
 #undef CONTAINS
@@ -590,12 +527,11 @@ test_ext_or_handshake(void *arg)
 }
 
 struct testcase_t extorport_tests[] = {
-  { "id_map", test_ext_or_id_map, TT_FORK, NULL, NULL },
   { "write_command", test_ext_or_write_command, TT_FORK, NULL, NULL },
   { "init_auth", test_ext_or_init_auth, TT_FORK, NULL, NULL },
   { "cookie_auth", test_ext_or_cookie_auth, TT_FORK, NULL, NULL },
   { "cookie_auth_testvec", test_ext_or_cookie_auth_testvec, TT_FORK,
     NULL, NULL },
-  { "handshake", test_ext_or_handshake, TT_FORK, NULL, NULL },
+  { "handshake", test_ext_or_handshake, TT_FORK, &helper_pubsub_setup, NULL },
   END_OF_TESTCASES
 };
